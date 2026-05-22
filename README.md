@@ -35,7 +35,7 @@ This project utilizes the LIN bus, a communication network in vehicles, to read 
 ## Wiring Diagram
 Please note that the wiring diagram is based on my specific setup. The wiring may be different depending on the steering wheel model or MCU board used.
 
-![Wiring Diagram](./wiring.png)
+![Wiring Diagram](./Wiring.png)
 
 ## LIN Protocol
 
