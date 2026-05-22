@@ -2,7 +2,7 @@
 
 I was inspired by Funny_Procedure_7609 on Reddit's conversion of a Porsche Steering Wheel and decided that I can't be that hard to make all to Buttons work. One Month later I have a working Steering Wheel with all Buttons converted on an ESP32 working over Bluetooth. I am using the BLE Libary for Ardunino for connecting to Windows. If you buy an Arduino ESP32-S3 or some other board that has HID communication directly integrated you can also use a wired connection. Currently I am working on finalzing everything and fitting it.
 
-Huge thanks to the Community over at (vwidtalk.com(https://www.vwidtalk.com/threads/i-have-real-steering-wheel-buttons.18466/page-8)) and specifically JohnnyForElectric who posted his ID 4 LIN communication snippets. With out this file the Project would have taken way longer.
+Huge thanks to the Community over at ![vwidtalk.com](https://www.vwidtalk.com/threads/i-have-real-steering-wheel-buttons.18466/page-8) and specifically JohnnyForElectric who posted his ID 4 LIN communication snippets. With out this file the Project would have taken way longer.
 
 ## Features
 
