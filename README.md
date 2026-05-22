@@ -4,6 +4,8 @@ I was inspired by Funny_Procedure_7609 on Reddit's conversion of a Porsche Steer
 
 Huge thanks to the Community over at [vwidtalk.com](https://www.vwidtalk.com/threads/i-have-real-steering-wheel-buttons.18466/page-8) and specifically JohnnyForElectric who posted his ID 4 LIN communication snippets. With out this file the Project would have taken way longer.
 
+![Steering Wheel Example](./Steering Wheel.jpg)
+
 ## Features
 
 *   **Steering Wheel Integration**
