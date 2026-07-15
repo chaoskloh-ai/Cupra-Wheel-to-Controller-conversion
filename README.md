@@ -30,11 +30,27 @@ This project utilizes the LIN bus, a communication network in vehicles, to read 
 
 | Part                    | Description                                                                     | Part Number |
 |-------------------------|---------------------------------------------------------------------------------|-------------|
-| Steering Wheel          | Top Spec Cupra Steering Wheel                                            | 5FA 419 091 FK XEY |
-| LIN Transceiver         | TJA1020, TJA1021, or SIT1021T (I used a cheap TJA1021T from Aliexpress   | -                  |
-| ESP32                   | Any ESP32 development board                                              | -                  |
+| Steering Wheel          | Top Spec Cupra Steering Wheel                                                | 5FA 419 091 FK XEY |
+| LIN Transceiver         | TJA1020, TJA1021, or SIT1021T (I used a cheap TJA1021T from Aliexpress       | -                  |
+| ESP32                   | Any ESP32 development board                                                  | -                  |
+| 5V-12V Step-Up-Module   | Any 5V-12V will do if you plan on using USB-C                                | -                  |
+| Tanleki Tiny Emulator   | For Fanatec at least you will need an Emulator for the force Feedback to work| [I used this one](https://de.aliexpress.com/item/1005007286369952.html?spm=a2g0o.order_list.order_list_main.11.62b55c5fwRTabe&gatewayAdapt=glo2deu)|
+| Fanatec QR1 Wheelside   | Because I am using Fanatec your Wheelside may wary                           | -                  |
+| Steering Column         | I used a steering column of a Steat Leon. Not sure if they are all the same  | 5WB 419 502 F      |
+| Center Wheel Screw      | Center Screw since I am using OEM Parts to attach the Wheel                  | N90799102          |
+
+## Buidling the Adapter
+
+Please note that depending on your specific needs or constraints you may need to do things differently.
+
+I went the OEM route because I think is cheaper than manufacturing everything from scratch. For the first step I cut the front most part of the steering wheel a bit behind the spline. Then I welded the piece to a steel plate. You have to make sure everything stays relativly lined up or your wheel will later be wobbly. 
+On the backside opposite the column part I attached the wheelside adapter.
+
+![Steering Wheel Example](./SampleImage2.jpg)
+![Steering Wheel Example](./SampleImage1.jpg)
 
 ## Wiring Diagram
+
 Please note that the wiring diagram is based on my specific setup. The wiring may be different depending on the steering wheel model or MCU board used.
 
 ![Wiring Diagram](./Wiring.png)
