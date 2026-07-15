@@ -46,8 +46,8 @@ Please note that depending on your specific needs or constraints you may need to
 I went the OEM route because I think is cheaper than manufacturing everything from scratch. For the first step I cut the front most part of the steering wheel a bit behind the spline. Then I welded the piece to a steel plate. You have to make sure everything stays relativly lined up or your wheel will later be wobbly. 
 On the backside opposite the column part I attached the wheelside adapter.
 
-![Adapter Example 1](./SampleImage2.jpg)
-![Adapter Example 2](./SampleImage1.jpg)
+![Adapter Example 1](./SampleImage1.jpg)
+![Adapter Example 2](./SampleImage2.jpg)
 
 ## Wiring Diagram
 
