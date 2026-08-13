@@ -9,10 +9,10 @@
 #define PIN_ACC_WEISS 25
 #define PIN_START_GELB 26
 
-// ---- Debounce-Zeiten (ms) ----
-#define DEBOUNCE_MS_ACC   25   // digitaler ACC-Pin (anfällig für Störungen, da floatend/direkt gelesen)
-#define DEBOUNCE_MS_START 20   // analoger START-Pin (Schwellwert-Erkennung)
-#define DEBOUNCE_MS_LIN   50   // LIN-Bus Rohbytes (ca. 1 Poll-Zyklus a 60ms Toleranz)
+// --- NEU: Entprellzeiten (nur für die direkten GPIO/ADC-Taster BTN24 & BTN25) ---
+// Bewusst kurz gehalten, damit keine spürbare Latenz entsteht.
+#define DEBOUNCE_MS_ACC   15
+#define DEBOUNCE_MS_START 15
 
 BleGamepad bleGamepad("Cupra Wheel", "VAG Retrofit", 100);
 
@@ -27,47 +27,14 @@ uint8_t lastWippenByte = 0;
 bool lastAccState = HIGH;
 bool lastStartState = false;
 
+// --- NEU: Zwischenspeicher für die Entprellung ---
+bool pendingAccState = HIGH;
+unsigned long accChangeTime = 0;
+
+bool pendingStartState = false;
+unsigned long startChangeTime = 0;
+
 uint32_t simhubButtons = 0;
-
-// ---------------------------------------------------------------------
-// Generischer Software-Debounce (zeitbasiert, "muss X ms stabil sein")
-// ---------------------------------------------------------------------
-struct DebounceU8 {
-  uint8_t committed = 0;
-  uint8_t candidate = 0;
-  unsigned long candidateSince = 0;
-  bool primed = false;
-};
-
-uint8_t debounceUpdate(DebounceU8 &d, uint8_t raw, unsigned long now, unsigned long stableMs) {
-  if (!d.primed) {
-    // Erster Aufruf: Zustand direkt übernehmen, kein Trigger beim Boot
-    d.committed = raw;
-    d.candidate = raw;
-    d.candidateSince = now;
-    d.primed = true;
-    return d.committed;
-  }
-
-  if (raw != d.candidate) {
-    // Neuer Rohwert -> Timer neu starten
-    d.candidate = raw;
-    d.candidateSince = now;
-  } else if (d.candidate != d.committed && (now - d.candidateSince) >= stableMs) {
-    // Rohwert war lange genug stabil -> übernehmen
-    d.committed = d.candidate;
-  }
-
-  return d.committed;
-}
-
-// Debounce-Instanzen
-DebounceU8 dbAcc;
-DebounceU8 dbStart;
-DebounceU8 dbLeftB1;
-DebounceU8 dbLeftB3;
-DebounceU8 dbLeftB6;
-DebounceU8 dbRightB2;
 
 void triggerGamepadButton(uint8_t buttonId, bool pressed) {
   if (bleGamepad.isConnected()) {
@@ -94,6 +61,11 @@ uint8_t checksumEnhanced(uint8_t pid, const uint8_t* data, uint8_t len) {
     if (sum >= 256) sum = (sum & 0xFF) + 1;
   }
   return (uint8_t)(~sum);
+}
+
+// --- NEU: prüft die vom Slave empfangene Checksumme gegen die berechnete ---
+bool verifyLinChecksum(uint8_t pid, const uint8_t* data, uint8_t len, uint8_t receivedChecksum) {
+  return checksumEnhanced(pid, data, len) == receivedChecksum;
 }
 
 void generatePhysicalHeader() {
@@ -226,20 +198,23 @@ void pollSlave(uint8_t id) {
   }
 
   if (idx >= 10) {
-    unsigned long now = millis();
+    // --- NEU: Checksumme des empfangenen Frames prüfen, bevor wir ihn verwerten.
+    // Das ist der eigentliche Fix für "keine Mechanik gegen Prellen/Störungen":
+    // Ein durch Störung verfälschtes Byte erzeugt sonst kurzzeitig einen falschen
+    // Tastencode -> Phantom-Press/-Release, obwohl die Taste real durchgehend
+    // gehalten wird. Schlägt die Checksumme fehl, wird der Frame komplett
+    // verworfen und der zuletzt bestätigte Zustand bleibt bestehen - ohne dass
+    // dafür irgendeine künstliche Verzögerung nötig ist. Reaktionsgeschwindigkeit
+    // von Wippen/+-/Cupra-Taste bleibt dadurch unverändert schnell.
+    uint8_t dataLen = idx - 3; // abzüglich 0x55, PID, Checksumme
+    bool checksumOk = verifyLinChecksum(rawBuffer[1], &rawBuffer[2], dataLen, rawBuffer[idx - 1]);
 
-    if (id == 0x0E) {
-      // Rohbytes zuerst entprellen, danach erst in die Interpretation geben.
-      // So lösen einzelne verfälschte/verrauschte LIN-Frames keinen sofortigen
-      // Press/Release-Wechsel mehr aus - der Wert muss DEBOUNCE_MS_LIN lang
-      // stabil ankommen, bevor er als "neuer Zustand" gilt.
-      uint8_t b1 = debounceUpdate(dbLeftB1, rawBuffer[3], now, DEBOUNCE_MS_LIN);
-      uint8_t b3 = debounceUpdate(dbLeftB3, rawBuffer[5], now, DEBOUNCE_MS_LIN);
-      uint8_t b6 = debounceUpdate(dbLeftB6, rawBuffer[8], now, DEBOUNCE_MS_LIN);
-      interpretLeftIsland(b1, b3, b6);
-    } else if (id == 0x0F) {
-      uint8_t b2 = debounceUpdate(dbRightB2, rawBuffer[4], now, DEBOUNCE_MS_LIN);
-      interpretRightIsland(b2);
+    if (checksumOk) {
+      if (id == 0x0E) {
+        interpretLeftIsland(rawBuffer[3], rawBuffer[5], rawBuffer[8]);
+      } else if (id == 0x0F) {
+        interpretRightIsland(rawBuffer[4]);
+      }
     }
   }
 }
@@ -261,24 +236,31 @@ void sendBacklight() {
 void checkAnalogButtons() {
   unsigned long now = millis();
 
-  // --- BTN24 (ACC_WEISS) ---
-  // Vorher: digitalRead() ohne jede Filterung -> jedes Rauschen/jeder
-  // Kontaktprellen-Spike hat sofort press()/release() ausgelöst.
-  // Jetzt: Rohwert muss DEBOUNCE_MS_ACC lang stabil sein, bevor er übernommen wird.
+  // --- BTN24 (ACC_WEISS) - jetzt entprellt ---
+  // Vorher: jede rohe Pegeländerung wurde sofort durchgereicht -> bei Kontaktprellen
+  // bzw. Störspannung auf der Leitung feuerte der Button mehrfach hintereinander.
+  // Jetzt: ein neuer Pegel muss DEBOUNCE_MS_ACC lang stabil bleiben, bevor er
+  // übernommen wird.
   bool rawAcc = digitalRead(PIN_ACC_WEISS);
-  bool currentAcc = debounceUpdate(dbAcc, rawAcc ? 1 : 0, now, DEBOUNCE_MS_ACC) != 0;
-  if (currentAcc != lastAccState) {
-    lastAccState = currentAcc;
-    triggerGamepadButton(24, (currentAcc == LOW));
+  if (rawAcc != pendingAccState) {
+    pendingAccState = rawAcc;
+    accChangeTime = now;
+  }
+  if ((now - accChangeTime) >= DEBOUNCE_MS_ACC && pendingAccState != lastAccState) {
+    lastAccState = pendingAccState;
+    triggerGamepadButton(24, (lastAccState == LOW));
   }
 
-  // --- BTN25 (START_GELB) ---
+  // --- BTN25 (START_GELB) - gleiche Entprellung ---
   int adcGelb = analogRead(PIN_START_GELB);
   bool rawStart = (adcGelb < 3800);
-  bool currentStart = debounceUpdate(dbStart, rawStart ? 1 : 0, now, DEBOUNCE_MS_START) != 0;
-  if (currentStart != lastStartState) {
-    lastStartState = currentStart;
-    triggerGamepadButton(25, currentStart);
+  if (rawStart != pendingStartState) {
+    pendingStartState = rawStart;
+    startChangeTime = now;
+  }
+  if ((now - startChangeTime) >= DEBOUNCE_MS_START && pendingStartState != lastStartState) {
+    lastStartState = pendingStartState;
+    triggerGamepadButton(25, lastStartState);
   }
 }
 
