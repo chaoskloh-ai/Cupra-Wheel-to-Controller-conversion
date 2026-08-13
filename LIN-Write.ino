@@ -9,24 +9,10 @@
 #define PIN_ACC_WEISS 25
 #define PIN_START_GELB 26
 
-// TODO: An tatsächliche Verkabelung anpassen! Analog zu PIN_ACC_WEISS/PIN_START_GELB
-// wird die Cupra-Logo-Taste hier als eigener, separater digitaler Eingang angenommen
-// (nicht Teil des LIN-Frames), da sie zusammen mit dem Scrollrad (LIN 0x0E, b1=0x06)
-// gehalten werden soll und ein einzelnes LIN-Byte pro Insel i.d.R. nur einen Zustand
-// gleichzeitig abbilden kann.
-#define PIN_CUPRA_BTN 27
-
 // ---- Debounce-Zeiten (ms) ----
-#define DEBOUNCE_MS_ACC    25   // digitaler ACC-Pin
-#define DEBOUNCE_MS_START  20   // analoger START-Pin
-#define DEBOUNCE_MS_CUPRA  25   // digitaler Cupra-Taster
-#define DEBOUNCE_MS_LIN    50   // LIN-Bus Rohbytes (ca. 1 Poll-Zyklus a 60ms Toleranz)
-
-// ---- Backlight ----
-#define BACKLIGHT_MIN            0x00
-#define BACKLIGHT_MAX            0x7F
-#define BACKLIGHT_STEP           0x10
-#define BACKLIGHT_RESPONSE_BYTE  0xF9   // unverändert aus Originalcode übernommen (Byte 1 von 0x0D)
+#define DEBOUNCE_MS_ACC   25   // digitaler ACC-Pin (anfällig für Störungen, da floatend/direkt gelesen)
+#define DEBOUNCE_MS_START 20   // analoger START-Pin (Schwellwert-Erkennung)
+#define DEBOUNCE_MS_LIN   50   // LIN-Bus Rohbytes (ca. 1 Poll-Zyklus a 60ms Toleranz)
 
 BleGamepad bleGamepad("Cupra Wheel", "VAG Retrofit", 100);
 
@@ -36,21 +22,10 @@ uint8_t scheduleStep = 0;
 
 uint8_t lastLeftButton = 0;
 uint8_t lastLeftDirection = 0;
-bool lastLeftWasCombo = false;   // true, wenn die aktuell gehaltene Taste als Backlight-Kombo verbraucht wurde
 uint8_t lastRightButton = 0;
 uint8_t lastWippenByte = 0;
 bool lastAccState = HIGH;
 bool lastStartState = false;
-
-// Cupra-Modifier-Taste
-bool lastCupraState = false;
-bool cupraHeld = false;
-bool cupraComboUsed = false;
-
-// Backlight-Zustand
-uint8_t backlightBrightness = BACKLIGHT_MAX;
-uint8_t backlightLastLevel = BACKLIGHT_MAX;  // zum Wiederherstellen nach "aus"
-bool backlightOn = true;
 
 uint32_t simhubButtons = 0;
 
@@ -66,6 +41,7 @@ struct DebounceU8 {
 
 uint8_t debounceUpdate(DebounceU8 &d, uint8_t raw, unsigned long now, unsigned long stableMs) {
   if (!d.primed) {
+    // Erster Aufruf: Zustand direkt übernehmen, kein Trigger beim Boot
     d.committed = raw;
     d.candidate = raw;
     d.candidateSince = now;
@@ -74,9 +50,11 @@ uint8_t debounceUpdate(DebounceU8 &d, uint8_t raw, unsigned long now, unsigned l
   }
 
   if (raw != d.candidate) {
+    // Neuer Rohwert -> Timer neu starten
     d.candidate = raw;
     d.candidateSince = now;
   } else if (d.candidate != d.committed && (now - d.candidateSince) >= stableMs) {
+    // Rohwert war lange genug stabil -> übernehmen
     d.committed = d.candidate;
   }
 
@@ -86,7 +64,6 @@ uint8_t debounceUpdate(DebounceU8 &d, uint8_t raw, unsigned long now, unsigned l
 // Debounce-Instanzen
 DebounceU8 dbAcc;
 DebounceU8 dbStart;
-DebounceU8 dbCupra;
 DebounceU8 dbLeftB1;
 DebounceU8 dbLeftB3;
 DebounceU8 dbLeftB6;
@@ -142,36 +119,6 @@ void sendUdsInitialization() {
   Serial1.flush();
 }
 
-// ---------------------------------------------------------------------
-// Backlight-Steuerung
-// ---------------------------------------------------------------------
-void setBacklight(uint8_t level, bool on) {
-  backlightBrightness = level;
-  backlightOn = on;
-  if (level > BACKLIGHT_MIN) backlightLastLevel = level;
-}
-
-void adjustBacklight(int16_t step) {
-  int16_t base = backlightOn ? backlightBrightness : BACKLIGHT_MIN;
-  int16_t newLevel = base + step;
-
-  if (newLevel > BACKLIGHT_MAX) newLevel = BACKLIGHT_MAX;
-
-  if (newLevel <= BACKLIGHT_MIN) {
-    setBacklight(BACKLIGHT_MIN, false);
-  } else {
-    setBacklight((uint8_t)newLevel, true);
-  }
-}
-
-void toggleBacklight() {
-  if (backlightOn) {
-    setBacklight(BACKLIGHT_MIN, false);
-  } else {
-    setBacklight(backlightLastLevel > BACKLIGHT_MIN ? backlightLastLevel : BACKLIGHT_MAX, true);
-  }
-}
-
 void interpretLeftIsland(uint8_t b1, uint8_t b3, uint8_t b6) {
   if (b1 != lastLeftButton || b3 != lastLeftDirection) {
     if (lastLeftButton != 0x00) {
@@ -179,12 +126,8 @@ void interpretLeftIsland(uint8_t b1, uint8_t b3, uint8_t b6) {
         triggerGamepadButton(1, false);
         triggerGamepadButton(2, false);
       } else if (lastLeftButton == 0x06) {
-        // Nur normale Gamepad-Buttons freigeben, wenn diese Betätigung NICHT
-        // als Backlight-Kombo verbraucht wurde.
-        if (!lastLeftWasCombo) {
-          triggerGamepadButton(6, false);
-          triggerGamepadButton(7, false);
-        }
+        triggerGamepadButton(6, false);
+        triggerGamepadButton(7, false);
       } else {
         switch (lastLeftButton) {
           case 0x20: triggerGamepadButton(3, false); break;
@@ -204,23 +147,13 @@ void interpretLeftIsland(uint8_t b1, uint8_t b3, uint8_t b6) {
 
     lastLeftButton = b1;
     lastLeftDirection = b3;
-    lastLeftWasCombo = false;
 
     if (b1 != 0x00) {
       switch (b1) {
         case 0x12: triggerGamepadButton((b3 == 0x01) ? 1 : 2, true); break;
         case 0x20: triggerGamepadButton(3, true); break;
         case 0x07: triggerGamepadButton(4, true); break;
-        case 0x06:
-          if (cupraHeld) {
-            // Kombo: Cupra-Taste + Scrollrad -> Beleuchtung dimmen statt Gamepad-Button
-            cupraComboUsed = true;
-            lastLeftWasCombo = true;
-            adjustBacklight((b3 == 0x01) ? BACKLIGHT_STEP : -BACKLIGHT_STEP);
-          } else {
-            triggerGamepadButton((b3 == 0x01) ? 6 : 7, true);
-          }
-          break;
+        case 0x06: triggerGamepadButton((b3 == 0x01) ? 6 : 7, true); break;
         case 0x03: triggerGamepadButton(8, true); break;
         case 0x02: triggerGamepadButton(9, true); break;
         case 0x15: triggerGamepadButton(10, true); break;
@@ -296,6 +229,10 @@ void pollSlave(uint8_t id) {
     unsigned long now = millis();
 
     if (id == 0x0E) {
+      // Rohbytes zuerst entprellen, danach erst in die Interpretation geben.
+      // So lösen einzelne verfälschte/verrauschte LIN-Frames keinen sofortigen
+      // Press/Release-Wechsel mehr aus - der Wert muss DEBOUNCE_MS_LIN lang
+      // stabil ankommen, bevor er als "neuer Zustand" gilt.
       uint8_t b1 = debounceUpdate(dbLeftB1, rawBuffer[3], now, DEBOUNCE_MS_LIN);
       uint8_t b3 = debounceUpdate(dbLeftB3, rawBuffer[5], now, DEBOUNCE_MS_LIN);
       uint8_t b6 = debounceUpdate(dbLeftB6, rawBuffer[8], now, DEBOUNCE_MS_LIN);
@@ -309,12 +246,7 @@ void pollSlave(uint8_t id) {
 
 void sendBacklight() {
   uint8_t pid = calculateLINPID(0x0D);
-  uint8_t payload[4] = {
-    backlightOn ? backlightBrightness : BACKLIGHT_MIN,
-    BACKLIGHT_RESPONSE_BYTE,
-    0xFF,
-    0xFF
-  };
+  uint8_t payload[4] = { 0x7F, 0xF9, 0xFF, 0xFF };
   uint8_t checksum = checksumEnhanced(pid, payload, 4);
 
   generatePhysicalHeader();
@@ -330,6 +262,9 @@ void checkAnalogButtons() {
   unsigned long now = millis();
 
   // --- BTN24 (ACC_WEISS) ---
+  // Vorher: digitalRead() ohne jede Filterung -> jedes Rauschen/jeder
+  // Kontaktprellen-Spike hat sofort press()/release() ausgelöst.
+  // Jetzt: Rohwert muss DEBOUNCE_MS_ACC lang stabil sein, bevor er übernommen wird.
   bool rawAcc = digitalRead(PIN_ACC_WEISS);
   bool currentAcc = debounceUpdate(dbAcc, rawAcc ? 1 : 0, now, DEBOUNCE_MS_ACC) != 0;
   if (currentAcc != lastAccState) {
@@ -347,38 +282,11 @@ void checkAnalogButtons() {
   }
 }
 
-// ---------------------------------------------------------------------
-// Cupra-Taste: Modifier für die Backlight-Kombo + Tap = Ein/Aus
-// ---------------------------------------------------------------------
-void checkCupraButton() {
-  unsigned long now = millis();
-
-  // TODO: Pegel prüfen/anpassen (hier: Taster gegen GND, INPUT_PULLUP -> LOW = gedrückt)
-  bool raw = (digitalRead(PIN_CUPRA_BTN) == LOW);
-  bool debounced = debounceUpdate(dbCupra, raw ? 1 : 0, now, DEBOUNCE_MS_CUPRA) != 0;
-
-  if (debounced && !lastCupraState) {
-    // Flanke: Taste gerade gedrückt
-    cupraHeld = true;
-    cupraComboUsed = false;
-  } else if (!debounced && lastCupraState) {
-    // Flanke: Taste losgelassen
-    cupraHeld = false;
-    if (!cupraComboUsed) {
-      // Reiner Tap ohne Scroll-Kombo -> Licht an/aus umschalten
-      toggleBacklight();
-    }
-  }
-
-  lastCupraState = debounced;
-}
-
 void setup() {
   Serial.begin(115200);
 
   pinMode(PIN_ACC_WEISS, INPUT);
   pinMode(PIN_START_GELB, INPUT_PULLUP);
-  pinMode(PIN_CUPRA_BTN, INPUT_PULLUP);
 
   pinMode(PIN_SLP_N, OUTPUT);
   digitalWrite(PIN_SLP_N, HIGH);
@@ -411,7 +319,6 @@ void loop() {
   }
 
   checkAnalogButtons();
-  checkCupraButton();
 
   // INTERNER SIMHUB-STANDARD:
   if (Serial.available() > 0) {
