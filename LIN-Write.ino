@@ -9,10 +9,30 @@
 #define PIN_ACC_WEISS 25
 #define PIN_START_GELB 26
 
-// --- NEU: Entprellzeiten (nur für die direkten GPIO/ADC-Taster BTN24 & BTN25) ---
-// Bewusst kurz gehalten, damit keine spürbare Latenz entsteht.
-#define DEBOUNCE_MS_ACC   15
-#define DEBOUNCE_MS_START 15
+// --- NEU: Debug-Logging für die linke Insel (Scroll-Cluster) ---
+// Auf 0 setzen, um das Logging wieder abzuschalten.
+#define DEBUG_LIN_CODES 1
+
+#if DEBUG_LIN_CODES
+  #define LIN_DEBUG_PRINT(...) Serial.print(__VA_ARGS__)
+  #define LIN_DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__)
+#else
+  #define LIN_DEBUG_PRINT(...)
+  #define LIN_DEBUG_PRINTLN(...)
+#endif
+
+// --- Entprellung nur noch für die direkten GPIO/ADC-Taster (BTN24/BTN25) ---
+// Die LIN-Buttons (Wippen, Scroll-Cluster, restliche Tasten) werden NICHT
+// mehr per Zeit-Debounce verzögert - dafür sorgt jetzt die Checksummen-
+// Prüfung in pollSlave() dafür, dass nur gültige, unverfälschte Frames
+// verarbeitet werden. Das vermeidet die doppelte Latenz, die durch
+// Zeit-Debounce bei einer 60ms-Polling-Kadenz entstehen würde.
+#define DEBOUNCE_MS_BUTTONS 25
+#define DEBOUNCE_MS_START   35
+
+// --- Hysterese-Schwellen für BTN25 (START_GELB) ---
+#define START_PRESS_THRESHOLD   3400
+#define START_RELEASE_THRESHOLD 3900
 
 BleGamepad bleGamepad("Cupra Wheel", "VAG Retrofit", 100);
 
@@ -27,7 +47,7 @@ uint8_t lastWippenByte = 0;
 bool lastAccState = HIGH;
 bool lastStartState = false;
 
-// --- NEU: Zwischenspeicher für die Entprellung ---
+// --- Zwischenspeicher für die Entprellung (nur GPIO/ADC-Taster) ---
 bool pendingAccState = HIGH;
 unsigned long accChangeTime = 0;
 
@@ -63,7 +83,9 @@ uint8_t checksumEnhanced(uint8_t pid, const uint8_t* data, uint8_t len) {
   return (uint8_t)(~sum);
 }
 
-// --- NEU: prüft die vom Slave empfangene Checksumme gegen die berechnete ---
+// --- NEU: prüft die vom Slave gesendete Checksumme gegen die berechnete.
+// Das ist jetzt der einzige Schutz gegen Störungen/Bitfehler auf dem LIN-Bus -
+// ohne künstliche Verzögerung, da nur ungültige Frames verworfen werden. ---
 bool verifyLinChecksum(uint8_t pid, const uint8_t* data, uint8_t len, uint8_t receivedChecksum) {
   return checksumEnhanced(pid, data, len) == receivedChecksum;
 }
@@ -91,7 +113,22 @@ void sendUdsInitialization() {
   Serial1.flush();
 }
 
+// --- Linke Insel: direkt/sofort, keine künstliche Verzögerung.
+// Schutz vor Störungen läuft jetzt komplett über die Checksummen-Prüfung
+// in pollSlave() - dadurch reagieren alle Tasten (normale Tasten, Wippen,
+// Scroll-Cluster) wieder mit der ursprünglichen ~60ms Poll-Latenz. ---
 void interpretLeftIsland(uint8_t b1, uint8_t b3, uint8_t b6) {
+  // Pfeiltasten (b1=0x06): b3 kodiert die Richtung. Gemessen: hoch=0x01,
+  // runter=0x0F. Beim schnellen Scrollen tauchen dazwischen kurz andere,
+  // ungültige b3-Werte auf, die vorher per Ternary (alles außer 0x01 =
+  // "runter") fälschlich als "runter" gewertet wurden - das war der Grund,
+  // warum nur "hoch" gelegentlich in die falsche Richtung sprang. Jetzt
+  // werden nur die zwei bestätigten Codes akzeptiert, alles andere wird als
+  // Störwert ignoriert und der zuletzt bestätigte Zustand bleibt bestehen.
+  if (b1 == 0x06 && b3 != 0x01 && b3 != 0x0F) {
+    return;
+  }
+
   if (b1 != lastLeftButton || b3 != lastLeftDirection) {
     if (lastLeftButton != 0x00) {
       if (lastLeftButton == 0x12) {
@@ -198,14 +235,10 @@ void pollSlave(uint8_t id) {
   }
 
   if (idx >= 10) {
-    // --- NEU: Checksumme des empfangenen Frames prüfen, bevor wir ihn verwerten.
-    // Das ist der eigentliche Fix für "keine Mechanik gegen Prellen/Störungen":
-    // Ein durch Störung verfälschtes Byte erzeugt sonst kurzzeitig einen falschen
-    // Tastencode -> Phantom-Press/-Release, obwohl die Taste real durchgehend
-    // gehalten wird. Schlägt die Checksumme fehl, wird der Frame komplett
-    // verworfen und der zuletzt bestätigte Zustand bleibt bestehen - ohne dass
-    // dafür irgendeine künstliche Verzögerung nötig ist. Reaktionsgeschwindigkeit
-    // von Wippen/+-/Cupra-Taste bleibt dadurch unverändert schnell.
+    // Checksumme prüfen, BEVOR der Frame verwertet wird. Ein durch Störung
+    // verfälschtes Byte (z.B. ein falscher Scroll-Code) fällt hier raus und
+    // der zuletzt bestätigte Zustand bleibt unverändert bestehen - ohne
+    // jede zusätzliche Latenz für gültige Frames.
     uint8_t dataLen = idx - 3; // abzüglich 0x55, PID, Checksumme
     bool checksumOk = verifyLinChecksum(rawBuffer[1], &rawBuffer[2], dataLen, rawBuffer[idx - 1]);
 
@@ -233,27 +266,36 @@ void sendBacklight() {
   delay(2);
 }
 
+// --- mehrere ADC-Samples mitteln, um einzelne Ausreißer zu glätten ---
+int readStartAdcAveraged() {
+  const uint8_t samples = 4;
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i < samples; i++) {
+    sum += analogRead(PIN_START_GELB);
+  }
+  return sum / samples;
+}
+
 void checkAnalogButtons() {
   unsigned long now = millis();
 
-  // --- BTN24 (ACC_WEISS) - jetzt entprellt ---
-  // Vorher: jede rohe Pegeländerung wurde sofort durchgereicht -> bei Kontaktprellen
-  // bzw. Störspannung auf der Leitung feuerte der Button mehrfach hintereinander.
-  // Jetzt: ein neuer Pegel muss DEBOUNCE_MS_ACC lang stabil bleiben, bevor er
-  // übernommen wird.
+  // --- BTN24 (ACC_WEISS) - entprellt ---
   bool rawAcc = digitalRead(PIN_ACC_WEISS);
   if (rawAcc != pendingAccState) {
     pendingAccState = rawAcc;
     accChangeTime = now;
   }
-  if ((now - accChangeTime) >= DEBOUNCE_MS_ACC && pendingAccState != lastAccState) {
+  if ((now - accChangeTime) >= DEBOUNCE_MS_BUTTONS && pendingAccState != lastAccState) {
     lastAccState = pendingAccState;
     triggerGamepadButton(24, (lastAccState == LOW));
   }
 
-  // --- BTN25 (START_GELB) - gleiche Entprellung ---
-  int adcGelb = analogRead(PIN_START_GELB);
-  bool rawStart = (adcGelb < 3800);
+  // --- BTN25 (START_GELB) - Mittelwert + Hysterese + Entprellung ---
+  int adcGelb = readStartAdcAveraged();
+  bool rawStart = lastStartState
+      ? (adcGelb < START_RELEASE_THRESHOLD)
+      : (adcGelb < START_PRESS_THRESHOLD);
+
   if (rawStart != pendingStartState) {
     pendingStartState = rawStart;
     startChangeTime = now;
